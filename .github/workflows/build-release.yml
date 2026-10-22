@@ -1,0 +1,110 @@
+
+name: Build and Release JDownloader Standalone
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout modified repository
+        uses: actions/checkout@v4
+        with:
+          path: source
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ant subversion openjdk-21-jdk zip
+
+      - name: Prepare source tree
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          test -d source/svn_trunk
+          test -d source/svn_utils
+          test -d source/svn_browser
+          test -d source/svn_MyJDownloaderClient
+
+          mv source/svn_utils AppWorkUtils
+          mv source/svn_browser JDBrowser
+          mv source/svn_MyJDownloaderClient MyJDownloaderClient
+          mv source/svn_trunk JDownloader
+
+          echo "JDownloader source:"
+          ls JDownloader
+
+      - name: Build complete standalone application
+        run: |
+          set -euxo pipefail
+
+          ant -Dbasedir=JDownloader \
+              -f JDownloader/build/newBuild/build_standalone.xml
+
+      - name: Package build
+        id: package
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          DIST="JDownloader/standalone/dist"
+          test -d "$DIST"
+          test -n "$(find "$DIST" -type f -print -quit)"
+
+          VERSION="${GITHUB_REF_NAME}"
+          if [[ "$GITHUB_REF" != refs/tags/* ]]; then
+            VERSION="manual-${GITHUB_RUN_NUMBER}"
+          fi
+
+          ARCHIVE="JDownloader-standalone-${VERSION}.zip"
+
+          cd "$DIST"
+          zip -qr "$GITHUB_WORKSPACE/$ARCHIVE" .
+          cd "$GITHUB_WORKSPACE"
+
+          sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: JDownloader-standalone-${{ steps.package.outputs.version }}
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.archive }}.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+        run: |
+          set -euxo pipefail
+
+          gh release create "$TAG" \
+            "$ARCHIVE" \
+            "$ARCHIVE.sha256" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "JDownloader Standalone $TAG" \
+            --notes "Full standalone build from commit $GITHUB_SHA." \
+            || {
+              gh release view "$TAG" --repo "$GITHUB_REPOSITORY"
+              gh release upload "$TAG" \
+                "$ARCHIVE" "$ARCHIVE.sha256" \
+                --repo "$GITHUB_REPOSITORY" --clobber
+            }
